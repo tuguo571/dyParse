@@ -1,0 +1,14 @@
+{
+  "name": "hellotik-douyin-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Node.js client for HelloTik Douyin parse API research",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "parse": "node index.mjs",
+    "start": "node index.mjs"
+  }
+}
