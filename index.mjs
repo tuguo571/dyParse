@@ -24,10 +24,13 @@ const PARSE_DECRYPT_SECRET = readEnv('PARSE_DECRYPT_SECRET', '');
 const STANDARD_B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const CUSTOM_B64 = 'ZYXABCDEFGHIJKLMNOPQRSTUVWzyxabcdefghijklmnopqrstuvw9876543210-_';
 const XOR_KEY = 0x5a;
+const PARSE_REQUEST_TIMEOUT_MS = 15_000;
+const PARSE_REQUEST_MAX_ATTEMPTS = 3;
 const DEFAULT_USER_AGENT = readEnv(
   'DEFAULT_USER_AGENT',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
 );
+let denoHttp1Client;
 
 function randomToken(length) {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -67,6 +70,72 @@ function requireConfig(name, value) {
   }
 
   throw new Error(`Missing required environment variable: ${name}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableNetworkError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /close_notify|unexpected[- ]eof|peer closed connection|connection error|sendrequest|socket|tls/i.test(
+    message
+  );
+}
+
+function getDenoHttp1Client() {
+  const createHttpClient = globalThis.Deno?.createHttpClient;
+  if (typeof createHttpClient !== 'function') {
+    return undefined;
+  }
+
+  if (!denoHttp1Client) {
+    denoHttp1Client = createHttpClient({
+      http1: true,
+      http2: false,
+      poolIdleTimeout: false
+    });
+  }
+
+  return denoHttp1Client;
+}
+
+async function fetchParseEndpoint(payload, token, attempt) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), PARSE_REQUEST_TIMEOUT_MS);
+
+  try {
+    const client = getDenoHttp1Client();
+    const requestInit = {
+      method: 'POST',
+      headers: {
+        Accept: '*/*',
+        Connection: 'close',
+        'Content-Type': 'application/json',
+        Origin: 'https://www.hellotik.app',
+        Referer: PARSE_PAGE_URL,
+        'User-Agent': DEFAULT_USER_AGENT,
+        'X-Auth-Token': token
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    };
+
+    if (client) {
+      requestInit.client = client;
+    }
+
+    return await fetch(PARSE_ENDPOINT, requestInit);
+  } catch (error) {
+    if (attempt < PARSE_REQUEST_MAX_ATTEMPTS && isRetryableNetworkError(error)) {
+      await sleep(250 * attempt);
+      return fetchParseEndpoint(payload, token, attempt + 1);
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function generateXAuthToken(payload, salt, ts, secret) {
@@ -167,18 +236,7 @@ function decryptParseResponse(encryptedData, encodedKey, secret = PARSE_DECRYPT_
 
 async function parseByHellotik(requestURL, overrides = {}) {
   const { payload, token } = buildParsePayload(requestURL, overrides);
-  const response = await fetch(PARSE_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      Accept: '*/*',
-      'Content-Type': 'application/json',
-      Origin: 'https://www.hellotik.app',
-      Referer: PARSE_PAGE_URL,
-      'User-Agent': DEFAULT_USER_AGENT,
-      'X-Auth-Token': token
-    },
-    body: JSON.stringify(payload)
-  });
+  const response = await fetchParseEndpoint(payload, token, 1);
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
